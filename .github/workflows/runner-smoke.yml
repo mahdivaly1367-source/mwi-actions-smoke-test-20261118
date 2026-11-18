@@ -1,26 +1,41 @@
-name: Public runner smoke test
+name: MWI Cloud Runner Health Ledger
 
 on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
   push:
     branches:
       - main
 
-permissions: {}
+permissions:
+  contents: write
+
+concurrency:
+  group: mwi-cloud-runner-health-ledger
+  cancel-in-progress: false
 
 jobs:
-  smoke:
+  heartbeat:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
-      - name: Verify hosted runner
-        shell: bash
+      - name: Check out runner infrastructure
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record runtime versions
         run: |
           set -euo pipefail
-          echo "PUBLIC_RUNNER_SMOKE=START"
-          echo "REPOSITORY=$GITHUB_REPOSITORY"
-          echo "RUNNER_OS=$RUNNER_OS"
-          echo "RUNNER_ARCH=$RUNNER_ARCH"
-          echo "RUNNER_NAME=$RUNNER_NAME"
-          echo "UTC_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          test -n "$RUNNER_NAME"
-          echo "PUBLIC_RUNNER_SMOKE=PASS"
+          python3 --version
+          git --version
+
+      - name: Verify heartbeat ledger unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Append public infrastructure heartbeat
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/runner_heartbeat.py
