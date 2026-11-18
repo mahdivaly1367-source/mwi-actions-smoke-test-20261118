@@ -12,9 +12,13 @@ The workflow downloads the current v1 observation and partition-manifest schemas
 - the manifest record count, first/last hashes, and serialized-ledger digest;
 - a final SHA-256 digest over the validation report.
 
-Only the validation report is uploaded, as one file, under:
+The three synthetic outputs are committed together in one Git commit:
 
-`audit/synthetic-validation/<YYYY-MM>/run-<run-id>-attempt-<attempt>.json`
+- JSONL fixture ledger under `audit/synthetic-validation/fixtures/<YYYY-MM>/`;
+- matching partition manifest beside the ledger;
+- validation report under `audit/synthetic-validation/<YYYY-MM>/`.
+
+After the write, the writer reads all three files back and compares their exact bytes. A separate read-only audit step then fetches the files again, independently recomputes the record/payload hashes and chain, checks both live schemas, verifies the manifest and report digests, and confirms the no-market-data boundary.
 
 No fixture is written under `data/spot-wave/` or `data/crowd-signal/`.
 
@@ -32,7 +36,7 @@ No fixture is written under `data/spot-wave/` or `data/crowd-signal/`.
 1. Confirm the `MWI_ARCHIVE_TOKEN` Actions secret and `MWI_ARCHIVE_CONNECTIVITY_ENABLED=true` repository variable exist in the public runner repository.
 2. Open **Actions → MWI Cloud Runner Health Ledger → Run workflow**.
 3. Select `main` and start the manual run.
-4. Confirm the step **Validate synthetic archive format and write integration report** succeeds.
-5. Find the report path printed in the job log, then verify that exact file exists in the private archive.
+4. Confirm **Validate synthetic archive format and write integration report** succeeds.
+5. Confirm **Independently audit private archive readback** succeeds. This step is read-only and does not modify the archive.
 
 No PowerShell command or local script execution is required.
