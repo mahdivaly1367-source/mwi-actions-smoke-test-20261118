@@ -588,6 +588,11 @@ def main() -> int:
         files, token, run_id=run_id, attempt=attempt
     )
 
+    output_file = os.environ.get("GITHUB_OUTPUT")
+    if output_file:
+        with open(output_file, "a", encoding="utf-8") as output:
+            output.write(f"report_path={report_path}\n")
+
     print("SYNTHETIC_ARCHIVE_VALIDATION=SUCCESS")
     print(f"ARCHIVE_REPOSITORY={archive_repository}")
     print(f"LEDGER_PATH={ledger_path}")
