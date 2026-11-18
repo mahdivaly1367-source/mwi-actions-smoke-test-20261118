@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from datetime import UTC, datetime
 
 from scripts import synthetic_archive_validation as archive
 
@@ -11,6 +12,13 @@ class SyntheticArchiveValidationTests(unittest.TestCase):
         self.observation_schema = {"type": "object"}
         self.manifest_schema = {"type": "object"}
         self.records = archive.build_synthetic_observations("test-run", 1)
+        self.ledger_path = (
+            "audit/synthetic-validation/fixtures/2026-11/test-run-attempt-1.jsonl"
+        )
+        self.manifest_path = (
+            "audit/synthetic-validation/fixtures/2026-11/test-run-attempt-1.manifest.json"
+        )
+        self.report_path = "audit/synthetic-validation/2026-11/test-run-attempt-1.json"
 
     def test_three_synthetic_records_form_a_valid_hash_chain(self) -> None:
         ledger, terminal_hash = archive.verify_observations(
@@ -42,10 +50,15 @@ class SyntheticArchiveValidationTests(unittest.TestCase):
             self.records, self.observation_schema
         )
         manifest = archive.build_and_verify_manifest(
-            self.records, ledger, terminal_hash, self.manifest_schema
+            self.records,
+            ledger,
+            terminal_hash,
+            self.manifest_schema,
+            self.ledger_path,
         )
         self.assertEqual(manifest["record_count"], 3)
         self.assertEqual(manifest["ledger_sha256"], archive.sha256_bytes(ledger))
+        self.assertEqual(manifest["partition_path"], self.ledger_path)
         self.assertEqual(manifest["audit_status"], "ok")
 
     def test_schema_validator_rejects_unexpected_properties(self) -> None:
@@ -79,26 +92,79 @@ class SyntheticArchiveValidationTests(unittest.TestCase):
             )
 
     def test_bundle_hash_and_synthetic_only_boundary(self) -> None:
-        observation_schema = {"type": "object"}
-        manifest_schema = {"type": "object"}
-        from datetime import UTC, datetime
-
         bundle = archive.build_validation_bundle(
             run_id="test-run",
             attempt=1,
             commit_sha="a" * 40,
-            observation_schema=observation_schema,
-            manifest_schema=manifest_schema,
+            observation_schema=self.observation_schema,
+            manifest_schema=self.manifest_schema,
             runner_observed_at=datetime(2026, 11, 18, tzinfo=UTC),
+            ledger_path=self.ledger_path,
+            manifest_path=self.manifest_path,
+            report_path=self.report_path,
         )
         archive.verify_bundle_hash(bundle)
         self.assertEqual(bundle["market_data_collection"], "not_performed")
         self.assertEqual(bundle["checks"]["hash_chain"], "passed")
+        self.assertEqual(bundle["archive_outputs"]["ledger_path"], self.ledger_path)
 
         tampered = copy.deepcopy(bundle)
         tampered["market_data_collection"] = "performed"
         with self.assertRaisesRegex(ValueError, "report hash mismatch"):
             archive.verify_bundle_hash(tampered)
+
+    def test_validation_paths_are_restricted_to_synthetic_audit_area(self) -> None:
+        archive.validate_archive_output_paths(
+            [self.ledger_path, self.manifest_path, self.report_path]
+        )
+        invalid = [
+            "data/spot-wave/unauthorized.jsonl",
+            self.manifest_path,
+            self.report_path,
+        ]
+        with self.assertRaisesRegex(ValueError, "restricted to audit"):
+            archive.validate_archive_output_paths(invalid)
+
+    def test_validation_paths_require_exactly_three_unique_files(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Exactly three unique"):
+            archive.validate_archive_output_paths(
+                [self.ledger_path, self.manifest_path, self.manifest_path]
+            )
+        with self.assertRaisesRegex(ValueError, "Exactly three unique"):
+            archive.validate_archive_output_paths([self.ledger_path, self.manifest_path])
+
+    def test_git_tree_entries_are_sorted_and_use_blob_mode(self) -> None:
+        entries = archive.build_git_tree_entries(
+            {
+                self.report_path: "c" * 40,
+                self.ledger_path: "a" * 40,
+                self.manifest_path: "b" * 40,
+            }
+        )
+        self.assertEqual(
+            [entry["path"] for entry in entries],
+            sorted([self.report_path, self.ledger_path, self.manifest_path]),
+        )
+        self.assertTrue(all(entry["mode"] == "100644" for entry in entries))
+        self.assertTrue(all(entry["type"] == "blob" for entry in entries))
+
+    def test_bundle_manifest_digest_matches_exact_sidecar_bytes(self) -> None:
+        bundle = archive.build_validation_bundle(
+            run_id="test-run",
+            attempt=1,
+            commit_sha="a" * 40,
+            observation_schema=self.observation_schema,
+            manifest_schema=self.manifest_schema,
+            runner_observed_at=datetime(2026, 11, 18, tzinfo=UTC),
+            ledger_path=self.ledger_path,
+            manifest_path=self.manifest_path,
+            report_path=self.report_path,
+        )
+        manifest_bytes = (archive.canonical_json(bundle["manifest"]) + "\n").encode("utf-8")
+        self.assertEqual(
+            bundle["archive_outputs"]["manifest_sha256"],
+            archive.sha256_bytes(manifest_bytes),
+        )
 
 
 if __name__ == "__main__":
