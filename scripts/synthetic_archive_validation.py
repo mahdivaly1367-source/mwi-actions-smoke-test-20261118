@@ -334,7 +334,7 @@ def build_validation_bundle(
             "ledger_sha256": sha256_bytes(ledger_bytes),
             "manifest_path": manifest_path,
             "manifest_sha256": sha256_bytes(
-                (canonical_json(manifest) + "\\n").encode("utf-8")
+                (canonical_json(manifest) + "\n").encode("utf-8")
             ),
             "report_path": report_path,
             "write_semantics": "single_git_commit_with_read_after_write_verification",
