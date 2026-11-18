@@ -35,6 +35,13 @@ jobs:
       - name: Verify heartbeat ledger unit tests
         run: python3 -m unittest discover -s tests -v
 
+      - name: Probe private archive connection
+        if: vars.MWI_ARCHIVE_CONNECTIVITY_ENABLED == 'true'
+        env:
+          MWI_ARCHIVE_TOKEN: ${{ secrets.MWI_ARCHIVE_TOKEN }}
+          MWI_ARCHIVE_REPOSITORY: mahdivaly1367-source/mwi-research-data-archive
+        run: python3 scripts/archive_connectivity_probe.py
+
       - name: Append public infrastructure heartbeat
         env:
           GITHUB_TOKEN: ${{ github.token }}
