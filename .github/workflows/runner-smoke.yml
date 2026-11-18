@@ -43,11 +43,20 @@ jobs:
         run: python3 scripts/archive_connectivity_probe.py
 
       - name: Validate synthetic archive format and write integration report
+        id: synthetic_validation
         if: github.event_name == 'workflow_dispatch' && vars.MWI_ARCHIVE_CONNECTIVITY_ENABLED == 'true'
         env:
           MWI_ARCHIVE_TOKEN: ${{ secrets.MWI_ARCHIVE_TOKEN }}
           MWI_ARCHIVE_REPOSITORY: mahdivaly1367-source/mwi-research-data-archive
         run: python3 scripts/synthetic_archive_validation.py
+
+      - name: Independently audit private archive readback
+        if: github.event_name == 'workflow_dispatch' && vars.MWI_ARCHIVE_CONNECTIVITY_ENABLED == 'true'
+        env:
+          MWI_ARCHIVE_TOKEN: ${{ secrets.MWI_ARCHIVE_TOKEN }}
+          MWI_ARCHIVE_REPOSITORY: mahdivaly1367-source/mwi-research-data-archive
+          MWI_ARCHIVE_REPORT_PATH: ${{ steps.synthetic_validation.outputs.report_path }}
+        run: python3 scripts/audit_synthetic_archive.py
 
       - name: Append public infrastructure heartbeat
         env:
