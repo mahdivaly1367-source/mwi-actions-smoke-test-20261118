@@ -256,6 +256,7 @@ def build_and_verify_manifest(
     ledger_bytes: bytes,
     last_hash: str,
     schema: dict,
+    partition_path: str,
 ) -> dict:
     manifest = {
         "schema_version": 1,
@@ -263,7 +264,7 @@ def build_and_verify_manifest(
         "provider_id": "synthetic_fixture_only",
         "market_type": "synthetic_test_only",
         "endpoint_id": "synthetic_fixture_v1",
-        "partition_path": "audit/synthetic-validation/synthetic-observations.jsonl",
+        "partition_path": partition_path,
         "record_count": len(records),
         "first_event_timestamp_utc": records[0]["event_timestamp_utc"],
         "last_event_timestamp_utc": records[-1]["event_timestamp_utc"],
@@ -295,6 +296,9 @@ def build_validation_bundle(
     observation_schema: dict,
     manifest_schema: dict,
     runner_observed_at: datetime,
+    ledger_path: str,
+    manifest_path: str,
+    report_path: str,
 ) -> dict:
     if runner_observed_at.tzinfo is None:
         raise ValueError("runner_observed_at must be timezone-aware")
@@ -302,7 +306,7 @@ def build_validation_bundle(
     records = build_synthetic_observations(run_id, attempt)
     ledger_bytes, last_hash = verify_observations(records, observation_schema)
     manifest = build_and_verify_manifest(
-        records, ledger_bytes, last_hash, manifest_schema
+        records, ledger_bytes, last_hash, manifest_schema, ledger_path
     )
 
     bundle = {
@@ -325,6 +329,16 @@ def build_validation_bundle(
         "manifest_schema_sha256": sha256_json(manifest_schema),
         "observations": records,
         "manifest": manifest,
+        "archive_outputs": {
+            "ledger_path": ledger_path,
+            "ledger_sha256": sha256_bytes(ledger_bytes),
+            "manifest_path": manifest_path,
+            "manifest_sha256": sha256_bytes(
+                (canonical_json(manifest) + "\\n").encode("utf-8")
+            ),
+            "report_path": report_path,
+            "write_semantics": "single_git_commit_with_read_after_write_verification",
+        },
         "checks": {
             "observation_schema_validation": "passed",
             "manifest_schema_validation": "passed",
@@ -351,39 +365,166 @@ def verify_bundle_hash(bundle: dict) -> None:
         raise ValueError("Synthetic test must not collect market data")
 
 
-def write_report_to_archive(path: str, report_bytes: bytes, token: str) -> str:
+def validate_archive_output_paths(paths: list[str]) -> None:
+    if len(paths) != 3 or len(set(paths)) != 3:
+        raise ValueError("Exactly three unique archive output paths are required")
+    for path in paths:
+        if not path.startswith("audit/synthetic-validation/"):
+            raise ValueError("Synthetic fixture writes are restricted to audit/synthetic-validation/")
+        if ".." in path.split("/") or path.startswith("/"):
+            raise ValueError("Unsafe archive path")
+        if not (
+            path.endswith(".json")
+            or path.endswith(".jsonl")
+        ):
+            raise ValueError("Unexpected archive output file extension")
+    if not any(path.endswith(".jsonl") for path in paths):
+        raise ValueError("Synthetic JSONL partition is missing")
+    if not any(path.endswith(".manifest.json") for path in paths):
+        raise ValueError("Synthetic partition manifest is missing")
+    if not any(path.endswith(".json") and not path.endswith(".manifest.json") for path in paths):
+        raise ValueError("Synthetic validation report is missing")
+
+
+def build_git_tree_entries(blob_shas: dict[str, str]) -> list[dict]:
+    return [
+        {
+            "path": path,
+            "mode": "100644",
+            "type": "blob",
+            "sha": blob_shas[path],
+        }
+        for path in sorted(blob_shas)
+    ]
+
+
+def archive_contents_url(path: str) -> str:
     api_path = quote(path, safe="/")
     query = urlencode({"ref": "main"})
-    url = (
+    return (
         f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/contents/"
         f"{api_path}?{query}"
     )
 
-    try:
-        existing = api_call("GET", url, token)
-    except GitHubAPIError as exc:
-        if exc.status != 404:
-            raise
-        existing = None
 
-    if existing is not None:
-        if existing.get("encoding") != "base64":
-            raise RuntimeError("Existing validation report has unsupported encoding")
-        existing_bytes = base64.b64decode(existing.get("content", ""))
-        if existing_bytes != report_bytes:
-            raise RuntimeError("Validation report path exists with different content")
-        return "ALREADY_PRESENT"
+def read_archive_file_bytes(path: str, token: str) -> bytes:
+    response = api_call("GET", archive_contents_url(path), token)
+    if response.get("encoding") != "base64":
+        raise RuntimeError(f"Archive file {path} has unexpected encoding")
+    return base64.b64decode(response.get("content", ""), validate=False)
 
-    body = {
-        "message": f"test(archive): synthetic integration validation {path.rsplit('/', 1)[-1]}",
-        "content": base64.b64encode(report_bytes).decode("ascii"),
-        "branch": "main",
-    }
-    result = api_call("PUT", url, token, body)
-    commit_sha = result.get("commit", {}).get("sha")
+
+def verify_archive_readback(expected_files: dict[str, bytes], token: str) -> None:
+    for path, expected_bytes in expected_files.items():
+        actual_bytes = read_archive_file_bytes(path, token)
+        if actual_bytes != expected_bytes:
+            raise RuntimeError(f"Archive read-after-write mismatch: {path}")
+
+
+def write_files_atomically(
+    files: dict[str, bytes],
+    token: str,
+    *,
+    run_id: str,
+    attempt: int,
+) -> tuple[str, str]:
+    paths = list(files)
+    validate_archive_output_paths(paths)
+
+    existing: dict[str, bytes] = {}
+    for path in paths:
+        try:
+            existing[path] = read_archive_file_bytes(path, token)
+        except GitHubAPIError as exc:
+            if exc.status != 404:
+                raise
+
+    if existing:
+        if len(existing) == len(files) and all(
+            existing[path] == files[path] for path in files
+        ):
+            verify_archive_readback(files, token)
+            return "ALREADY_PRESENT", "READBACK_VERIFIED"
+        raise RuntimeError(
+            "Partial or conflicting synthetic archive transaction already exists; refusing overwrite"
+        )
+
+    base_ref = api_call(
+        "GET",
+        f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/git/ref/heads/main",
+        token,
+    )
+    base_commit_sha = base_ref.get("object", {}).get("sha")
+    if not base_commit_sha:
+        raise RuntimeError("Could not resolve private archive main reference")
+
+    base_commit = api_call(
+        "GET",
+        f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/git/commits/{base_commit_sha}",
+        token,
+    )
+    base_tree_sha = base_commit.get("tree", {}).get("sha")
+    if not base_tree_sha:
+        raise RuntimeError("Could not resolve private archive base tree")
+
+    blob_shas: dict[str, str] = {}
+    for path, content in files.items():
+        blob = api_call(
+            "POST",
+            f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/git/blobs",
+            token,
+            {
+                "content": content.decode("utf-8"),
+                "encoding": "utf-8",
+            },
+        )
+        blob_sha = blob.get("sha")
+        if not blob_sha:
+            raise RuntimeError(f"GitHub did not return a blob SHA for {path}")
+        blob_shas[path] = blob_sha
+
+    tree = api_call(
+        "POST",
+        f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/git/trees",
+        token,
+        {
+            "base_tree": base_tree_sha,
+            "tree": build_git_tree_entries(blob_shas),
+        },
+    )
+    tree_sha = tree.get("sha")
+    if not tree_sha:
+        raise RuntimeError("GitHub did not return a transaction tree SHA")
+
+    commit = api_call(
+        "POST",
+        f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/git/commits",
+        token,
+        {
+            "message": (
+                "test(archive): atomic synthetic ledger, manifest and report "
+                f"{run_id}:{attempt}"
+            ),
+            "tree": tree_sha,
+            "parents": [base_commit_sha],
+        },
+    )
+    commit_sha = commit.get("sha")
     if not commit_sha:
-        raise RuntimeError("GitHub did not return the archive commit SHA")
-    return commit_sha
+        raise RuntimeError("GitHub did not return the atomic archive commit SHA")
+
+    api_call(
+        "PATCH",
+        f"https://api.github.com/repos/{EXPECTED_ARCHIVE}/git/refs/heads/main",
+        token,
+        {
+            "sha": commit_sha,
+            "force": False,
+        },
+    )
+
+    verify_archive_readback(files, token)
+    return commit_sha, "READBACK_VERIFIED"
 
 
 def main() -> int:
@@ -411,6 +552,13 @@ def main() -> int:
     manifest_schema = fetch_archive_json(
         "schemas/archive-manifest-v1.schema.json", token
     )
+    month = observed_at.strftime("%Y-%m")
+    stem = f"run-{run_id}-attempt-{attempt}"
+    base_path = f"audit/synthetic-validation/fixtures/{month}/{stem}"
+    ledger_path = f"{base_path}.jsonl"
+    manifest_path = f"{base_path}.manifest.json"
+    report_path = f"audit/synthetic-validation/{month}/{stem}.json"
+
     bundle = build_validation_bundle(
         run_id=run_id,
         attempt=attempt,
@@ -418,20 +566,38 @@ def main() -> int:
         observation_schema=observation_schema,
         manifest_schema=manifest_schema,
         runner_observed_at=observed_at,
+        ledger_path=ledger_path,
+        manifest_path=manifest_path,
+        report_path=report_path,
     )
     verify_bundle_hash(bundle)
 
+    ledger_bytes = (
+        "\n".join(canonical_json(record) for record in bundle["observations"]) + "\n"
+    ).encode("utf-8")
+    manifest_bytes = (canonical_json(bundle["manifest"]) + "\n").encode("utf-8")
     report_bytes = (canonical_json(bundle) + "\n").encode("utf-8")
-    month = observed_at.strftime("%Y-%m")
-    path = f"audit/synthetic-validation/{month}/run-{run_id}-attempt-{attempt}.json"
-    result = write_report_to_archive(path, report_bytes, token)
+
+    files = {
+        ledger_path: ledger_bytes,
+        manifest_path: manifest_bytes,
+        report_path: report_bytes,
+    }
+    validate_archive_output_paths(list(files))
+    commit_result, readback_result = write_files_atomically(
+        files, token, run_id=run_id, attempt=attempt
+    )
 
     print("SYNTHETIC_ARCHIVE_VALIDATION=SUCCESS")
     print(f"ARCHIVE_REPOSITORY={archive_repository}")
-    print(f"ARCHIVE_PATH={path}")
+    print(f"LEDGER_PATH={ledger_path}")
+    print(f"MANIFEST_PATH={manifest_path}")
+    print(f"REPORT_PATH={report_path}")
     print(f"REPORT_SHA256={bundle['report_sha256']}")
-    print(f"ARCHIVE_WRITE_RESULT={result}")
+    print(f"ARCHIVE_ATOMIC_COMMIT={commit_result}")
+    print(f"ARCHIVE_READBACK={readback_result}")
     print("SYNTHETIC_RECORDS=3")
+    print("ARCHIVE_FILES_COMMITTED_TOGETHER=3")
     print("MARKET_DATA_COLLECTION=NOT_PERFORMED")
     return 0
 
