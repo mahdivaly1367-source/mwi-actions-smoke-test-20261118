@@ -122,7 +122,7 @@ class SyntheticArchiveReadOnlyAuditTests(unittest.TestCase):
         report_bytes = (
             source.canonical_json(report) + "\n"
         ).encode("utf-8")
-        with self.assertRaisesRegex(ValueError, "no-market-data boundary"):
+        with self.assertRaisesRegex(ValueError, "must not collect market data"):
             self.audit(report_bytes=report_bytes)
 
     def test_broken_record_chain_is_rejected(self) -> None:
@@ -142,7 +142,7 @@ class SyntheticArchiveReadOnlyAuditTests(unittest.TestCase):
         report_bytes = (
             source.canonical_json(report) + "\n"
         ).encode("utf-8")
-        with self.assertRaisesRegex(ValueError, "manifest digest"):
+        with self.assertRaisesRegex(ValueError, "Report manifest differs"):
             self.audit(report_bytes=report_bytes)
 
     def test_report_required_check_flags_are_enforced(self) -> None:
