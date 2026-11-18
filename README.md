@@ -27,3 +27,10 @@ Standard GitHub-hosted runners are free for public repositories. This is not a p
 ## Ledger integrity
 
 Each monthly JSONL ledger has an append-only SHA-256 hash chain. Repeated delivery of the same workflow run/attempt is idempotent. The writer verifies the existing ledger before appending and fails closed if the chain is malformed or tampered with.
+
+
+## Private archive validation
+
+- A gated connectivity probe verifies access to the private research archive without collecting market data.
+- A separate synthetic-only integration check can be launched manually from **Actions**. It validates the archive's current v1 schemas, payload/record hashes, hash-chain continuity, and partition-manifest digest, then stores one report under \`audit/synthetic-validation/\` in the private archive.
+- Synthetic fixtures are never written to the Spot or crowd-signal research datasets. See [docs/SYNTHETIC_ARCHIVE_VALIDATION.md](docs/SYNTHETIC_ARCHIVE_VALIDATION.md).
